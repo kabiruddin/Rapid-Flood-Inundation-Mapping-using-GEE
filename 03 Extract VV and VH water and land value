@@ -1,0 +1,204 @@
+// Coordinates provided to zoom to a particular location in the study area
+Map.setCenter(90.5284, 24.2916, 8);
+
+// Pre-monsoon or pre-flood Copernicus Sentinel-1 Date: 2019-05-20
+var SenImgPre = ee.Image('COPERNICUS/S1_GRD/S1A_IW_GRDH_1SDV_20190520T120441_20190520T120506_027311_031480_43CA');
+
+// Flood inundation periods Copernicus Sentinel-1 Date: 2019-09-19
+var SenImgFlood = ee.Image('COPERNICUS/S1_GRD/S1A_IW_GRDH_1SDV_20190919T235547_20190919T235612_029097_034D72_B042');
+
+
+// Select and rename the VV polarization band from the pre-flood Sentinel-1 image 
+var vvPre = SenImgPre.select('VV').rename('VVPre');
+
+// Select the VV and VH polarization bands from the flood inundation periods Sentinel-1 image
+var vvFlood = SenImgFlood.select('VV');
+var vhFlood = SenImgFlood.select('VH');
+var vvvhFlood = vvFlood.divide(vhFlood).rename('VVVH_Flood_Ratio'); // VV/VH ratio
+
+// Apply speckle filtering to the Sentinel-1 images
+var vvFloodSmoothed = vvFlood.focal_median(100, 'circle', 'meters').rename('VVFlood_Filtered');
+var vhFloodSmoothed = vhFlood.focal_median(100, 'circle', 'meters').rename('VHFlood_Filtered');
+var vvvhFloodSmoothed = vvvhFlood.focal_median(100, 'circle', 'meters').rename('VVVHFlood_Filtered');
+var vvPreSmoothed = vvPre.focal_median(100, 'circle', 'meters').rename('VVPre_Filtered');
+
+// Calculate the difference between pre-flood and flood VV
+var vvDifference = vvPreSmoothed.subtract(vvFloodSmoothed).rename('VVDifference_Filtered');
+
+// Create and add RGB composite and Flood Image Composite layers
+var rgb_composite = ee.Image.cat([vvPreSmoothed, vhFloodSmoothed, vvvhFlood]);
+var FloodImgComposite = ee.Image.cat([vvFloodSmoothed, vvPreSmoothed, vvDifference, vvvhFlood, vhFloodSmoothed]);
+
+Map.addLayer(rgb_composite.clip(bnd), {
+  bands: ['VVPre_Filtered', 'VHFlood_Filtered', 'VVVH_Flood_Ratio'],
+  min: [-25, -25, 0],
+  max: [0, 0, 10],
+  gamma: 1.5
+}, 'Sentinel 20 Sep 2019');
+
+
+
+// Map.addLayer(FloodImgComposite, {
+//   bands: ['VVFlood_Filtered', 'VHFlood_Filtered', 'VVVH_Flood_Ratio'],
+//   min: [-25, -25, -10],
+//   max: [0, 0, 10],
+//   gamma: 1.5
+// }, 'Flood Image Composite');
+
+// Landsat image for comparison
+var landsat = ee.Image('LANDSAT/LC08/C02/T1_RT/LC08_137043_20190920');
+Map.addLayer(landsat, {bands: ['B5', 'B4', 'B3'], min: 2164, max: 20205}, 'Landsat 20 Sep 2019', false);
+
+// Determine the normal water bodies by masking
+var Sprevv_smoothedmask = vvPreSmoothed.updateMask(vvPreSmoothed.lt(-17)).toUint16();
+
+// Visualization parameters for the Sentinel backscatter.
+var floodViz = {min: 1, max: 3, palette: ['#3caadc', '007f00', '007f00']};
+
+
+
+
+
+// Apply speckle filtering to the Sentinel-1 images
+var vvFloodSmoothed = vvFlood.focal_median(100, 'circle', 'meters').rename('VVFlood_Filtered');
+var vhFloodSmoothed = vhFlood.focal_median(100, 'circle', 'meters').rename('VHFlood_Filtered');
+var vvvhFloodSmoothed = vvvhFlood.focal_median(100, 'circle', 'meters').rename('VVVHFlood_Filtered');
+var vvPreSmoothed = vvPre.focal_median(100, 'circle', 'meters').rename('VVPre_Filtered');
+
+
+// Flood masking and mosaicking the Sentinel 1 image.
+var FloodMap = ee.ImageCollection([
+  vvFloodSmoothed.updateMask(vvFloodSmoothed.lt(-17)).visualize(floodViz),
+  vhFloodSmoothed.updateMask(vhFloodSmoothed.lt(-21)).visualize(floodViz),
+  Sprevv_smoothedmask.visualize({palette: ['BLUE']}),
+]).mosaic();
+Map.addLayer(FloodMap.clip(bnd), {}, 'Flood Map');
+
+
+
+// Define water points (Assuming these are defined elsewhere in the script)
+var water_points = ee.FeatureCollection(water);
+
+// Extract and analyze values at the points for water pixels
+var sampled_water_points = vvFlood.addBands(vhFlood).sampleRegions({
+  collection: water_points,
+  scale: 30,
+  geometries: true
+});
+
+// Define reducers to calculate the min, max, mean, and median
+var minReducer = ee.Reducer.min();
+var maxReducer = ee.Reducer.max();
+var meanReducer = ee.Reducer.mean();
+var medianReducer = ee.Reducer.median();
+
+// Function to extract statistics
+function getStats(sampledPoints, band) {
+  var min = sampledPoints.reduceColumns(minReducer, [band]).get('min');
+  var max = sampledPoints.reduceColumns(maxReducer, [band]).get('max');
+  var mean = sampledPoints.reduceColumns(meanReducer, [band]).get('mean');
+  var median = sampledPoints.reduceColumns(medianReducer, [band]).get('median');
+  return ee.Dictionary({min: min, max: max, mean: mean, median: median});
+}
+
+// Extract stats for VV and VH for water points
+var waterStatsVV = getStats(sampled_water_points, 'VV');
+var waterStatsVH = getStats(sampled_water_points, 'VH');
+
+// Function to create features for chart
+function createFeature(stats, label, band) {
+  return ee.Feature(null, {
+    label: label + ' ' + band,
+    min: stats.get('min'),
+    mean: stats.get('mean'),
+    median: stats.get('median'),
+    max: stats.get('max')
+  });
+}
+
+// Create features for water points based on VV and VH statistics
+var waterVVFeature = createFeature(waterStatsVV, 'Water VV', 'VV');
+var waterVHFeature = createFeature(waterStatsVH, 'Water VH', 'VH');
+
+// Combine the features into a FeatureCollection
+var featureCollection = ee.FeatureCollection([waterVVFeature, waterVHFeature]);
+
+// Function to create a chart
+function createChart(title, featureCollection) {
+  return ui.Chart.feature.byFeature(featureCollection, 'label', ['min', 'mean', 'median', 'max'])
+    .setChartType('ColumnChart')
+    .setOptions({
+      title: title,
+      hAxis: {title: 'Statistic'},
+      vAxis: {title: 'Backscatter Value (dB)'},
+      series: {
+        0: {color: 'blue'},   // Min
+        1: {color: 'orange'}, // Mean
+        2: {color: 'green'},  // Median
+        3: {color: 'red'}     // Max
+      },
+      legend: {position: 'right'}
+    });
+}
+
+// Create and print the chart showing the min, mean, median, and max for VV and VH
+var intervalChart = createChart('VV and VH Polarization Intervals for Water Points', featureCollection);
+print(intervalChart);
+
+// Function to extract and print Min, Max, Mean, and Median statistics
+function printAllStats(sampledPoints, band, label) {
+  var stats = getStats(sampledPoints, band);
+  
+  print(label + ' Min:', stats.get('min'));
+  print(label + ' Max:', stats.get('max'));
+  print(label + ' Mean:', stats.get('mean'));
+  print(label + ' Median:', stats.get('median'));
+}
+
+// Print VV and VH statistics for water points
+printAllStats(sampled_water_points, 'VV', 'Water Points VV');
+printAllStats(sampled_water_points, 'VH', 'Water Points VH');
+
+
+
+
+
+// Define land points (Assuming these are defined elsewhere in the script)
+var land_points = ee.FeatureCollection(land);
+
+// Extract and analyze values at the points for land pixels
+var sampled_land_points = vvFlood.addBands(vhFlood).sampleRegions({
+  collection: land_points,
+  scale: 30,
+  geometries: true
+});
+
+// Extract stats for VV and VH for land points
+var landStatsVV = getStats(sampled_land_points, 'VV');
+var landStatsVH = getStats(sampled_land_points, 'VH');
+
+// Create features for land points based on VV and VH statistics
+var landVVFeature = createFeature(landStatsVV, 'Land VV', 'VV');
+var landVHFeature = createFeature(landStatsVH, 'Land VH', 'VH');
+
+// Combine the water and land features into a FeatureCollection
+var allFeatures = ee.FeatureCollection([waterVVFeature, waterVHFeature, landVVFeature, landVHFeature]);
+
+// Create and print the chart showing the min, mean, median, and max for VV and VH for both water and land
+var intervalChart = createChart('VV and VH Polarization Intervals for Water and Land Points', allFeatures);
+print(intervalChart);
+
+// Print VV and VH statistics for land points
+printAllStats(sampled_land_points, 'VV', 'Land Points VV');
+printAllStats(sampled_land_points, 'VH', 'Land Points VH');
+
+ 
+
+// Combine water and land points for visualization
+var combinedPoints = water_points.merge(land_points);
+Map.addLayer(combinedPoints, {color: 'yellow'}, 'Combined Points', false);
+
+/*
+Kabir Uddin, ICIMOD, Nepal Email: Kabir.Uddin@icimod.org kabir.uddin.bd@gmail.com 
+*/
+
