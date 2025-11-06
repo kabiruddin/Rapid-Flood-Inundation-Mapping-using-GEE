@@ -1,0 +1,222 @@
+Map.centerObject(bnd, 8);
+
+// Selecting the pre-monsoon or pre-flood Copernicus Sentinel-1 
+var preFloodSentinel1 = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterDate('2024-01-01', '2024-03-30')
+  .filterBounds(bnd); 
+
+// Filtering pre-flood Copernicus Sentinel-1 image by metadata properties.
+var preFloodVH_VV = preFloodSentinel1
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+  .filter(ee.Filter.eq('instrumentMode', 'IW'));
+
+// Filtering to get Sentinel-1 images from different look angles for pre-flood.
+var preFloodVH_VVAscend = preFloodVH_VV.filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'));
+var preFloodVH_VVDescend = preFloodVH_VV.filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING'));
+
+// Combine ascending and descending images and calculate mean
+var preFloodComposite = ee.Image.cat([
+  preFloodVH_VVAscend.select('VH').mean().rename('VHPre'),
+  ee.ImageCollection(preFloodVH_VVAscend.select('VV').merge(preFloodVH_VVDescend.select('VV'))).mean().rename('VVPre'),
+  preFloodVH_VVDescend.select('VH').mean().rename('VHPre')
+]).focal_median(100, 'circle', 'meters');
+
+// Selecting the flood Copernicus Sentinel-1 
+var floodSentinel1 = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterDate('2024-08-21', '2024-08-22')
+  .filterBounds(bnd);
+
+print(floodSentinel1)
+// Filtering flood time Copernicus Sentinel-1 image by metadata properties.
+var floodVH_VV = floodSentinel1
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+  .filter(ee.Filter.eq('instrumentMode', 'IW'));
+
+// Filtering flood time Copernicus Sentinel-1 image from different look angles.
+var floodVH_VVAscend = floodVH_VV.filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'));
+var floodVH_VVDescend = floodVH_VV.filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING'));
+
+// Create a composite from means at different polarizations and look angles.
+var floodComposite = ee.Image.cat([
+  floodVH_VVAscend.select('VH').mean(),
+  ee.ImageCollection(floodVH_VVAscend.select('VV').merge(floodVH_VVDescend.select('VV'))).mean(),
+  floodVH_VVDescend.select('VH').mean()
+]).focal_median();
+
+// Apply speckle filtering to the Sentinel-1 images
+var smoothedVV_Flood = floodComposite.select('VV').focal_median(100, 'circle', 'meters').rename('VVFlood_Smoothed');
+var smoothedVH_Flood = floodComposite.select('VH').focal_median(100, 'circle', 'meters').rename('VHFlood_Smoothed');
+
+// Calculate the VV/VH ratio using smoothed bands
+var floodVV_VHRatio = smoothedVV_Flood.divide(smoothedVH_Flood).rename('VVVH_Flood_Ratio');
+
+// Apply median smoothing to the VV/VH ratio
+var smoothedVVVHRatio_Flood = floodVV_VHRatio.focal_median(100, 'circle', 'meters').rename('VVVH_Flood_Smoothed');
+
+// Calculate the difference between pre-flood and flood VV
+var smoothedVV_PreFlood = preFloodComposite.select('VVPre').focal_median(100, 'circle', 'meters').rename('VVPre_Smoothed');
+var smoothedVH_PreFlood = preFloodComposite.select('VHPre').focal_median(100, 'circle', 'meters').rename('VHPre_Smoothed');
+var vvDifferenceFlood = smoothedVV_PreFlood.subtract(smoothedVV_Flood).rename('VVDifference_Flood_Smoothed');
+
+// Create and add RGB composite and Flood Image Composite layers
+var rgbComposite = ee.Image.cat([smoothedVV_PreFlood, smoothedVH_Flood, vvDifferenceFlood]);
+var floodImageComposite = ee.Image.cat([smoothedVV_Flood, smoothedVV_PreFlood, vvDifferenceFlood, smoothedVH_Flood]);
+
+Map.addLayer(rgbComposite.clip(bnd), {
+  bands: ['VVPre_Smoothed', 'VHFlood_Smoothed', 'VVDifference_Flood_Smoothed'],
+  min: [-25, -25, 0],
+  max: [0, 0, 10],
+  gamma: 1.5
+}, 'Sentinel RGB Composite');
+
+ 
+// Masking normal water bodies using VV PreFlood
+var waterMask_PreFlood = smoothedVV_PreFlood.updateMask(smoothedVV_PreFlood.lt(-17)).toUint16();
+
+
+// Define water points (assuming these are defined elsewhere)
+var waterPoints = ee.FeatureCollection(water);
+
+// Extract and analyze values at the points for water pixels
+var sampledWaterPoints = smoothedVV_Flood.addBands(smoothedVH_Flood).sampleRegions({
+  collection: waterPoints,
+  scale: 30,
+  geometries: true
+});
+
+
+// Create a Flood Image Composite using various bands
+var finalFloodImageComposite = ee.Image.cat([
+  smoothedVV_Flood.rename('VVFlood_Smoothed'), 
+  smoothedVH_PreFlood.rename('VHPre_Smoothed'), 
+  vvDifferenceFlood.rename('VVDifference_Flood_Smoothed'), 
+  floodVV_VHRatio.rename('VVVH_Flood_Ratio'), 
+  smoothedVH_Flood.rename('VHFlood_Smoothed'), 
+  smoothedVVVHRatio_Flood.rename('VVVH_Flood_Smoothed')
+]);
+
+ 
+// Merge training sample points together
+var trainingSample = flood.merge(water).merge(land);
+print(trainingSample, 'Training Sample');
+
+// Select the bands for training
+var trainingBands = ['VVFlood_Smoothed', 'VHPre_Smoothed', 'VVDifference_Flood_Smoothed', 'VVVH_Flood_Ratio', 'VHFlood_Smoothed', 'VVVH_Flood_Smoothed'];
+
+// Sample the input imagery to get a FeatureCollection of training data.
+var trainingData = finalFloodImageComposite.select(trainingBands).sampleRegions({
+  collection: trainingSample,
+  properties: ['className'],
+  scale: 30
+});
+
+// Select a classifier and train it.
+var classifier = ee.Classifier.smileCart().train({
+  features: trainingData,
+  classProperty: 'className',
+  inputProperties: trainingBands
+});
+
+// Classify the input imagery.
+var classifiedFloodRF = finalFloodImageComposite.select(trainingBands).classify(classifier);
+
+// Define a palette for the Land Use classification.
+var floodVisualizationRF = ['#3caadc', 'BLUE', '00ad00']
+
+ 
+
+// Add the classified map to the layer
+Map.addLayer(classifiedFloodRF.clip(bnd), {min: 1, max: 3, palette: floodVisualizationRF}, 'Flood Map RF');
+
+// Clip all images using the bnd layer (assumed to be an ee.Geometry object)
+var clippedRGBComposite = rgbComposite.clip(bnd);
+var clippedFloodRF = classifiedFloodRF.clip(bnd);
+
+
+// ** Export the RGB Composite Image to Google Drive **
+Export.image.toDrive({
+  image: clippedRGBComposite,  // Clipped RGB composite image
+  description: 'Sentinel1_RGB_Composite',
+  folder: 'a',  // Specify your Google Drive folder name
+  fileNamePrefix: 'Sentinel1_RGB_Composite_2024',  // File name of the exported image
+  scale: 10,  // Sentinel-1 resolution scale (adjust if necessary)
+  region: bnd,  // Define the region, assuming bnd is an ee.Geometry object
+  fileFormat: 'GeoTIFF',
+  maxPixels: 1e9  // Adjust this value if the default is too low for your region size
+});
+
+// ** Export the Random Forest Classified Flood Map (Flood Map RF) **
+Export.image.toDrive({
+  image: clippedFloodRF,  // Clipped Flood Map RF (Random Forest)
+  description: 'Flood_Map_RF',
+  folder: 'a',  // Specify the Google Drive folder name
+  fileNamePrefix: 'Flood_Map_RF',  // File name for the exported image
+  scale: 10,  // Sentinel-1 resolution scale
+  region: bnd,  // Region of interest (bnd should be defined as an ee.Geometry object)
+  fileFormat: 'GeoTIFF',
+  maxPixels: 3e9  // Adjust this if necessary for larger regions
+});
+
+
+
+/*
+Kabir Uddin, ICIMOD, Nepal Email: Kabir.Uddin@icimod.org kabir.uddin.bd@gmail.com 
+*/
+
+
+
+
+
+
+
+
+// Create a legend panel
+var legend = ui.Panel({
+  style: {
+    position: 'bottom-right',
+    padding: '8px 15px'
+  }
+});
+
+// Create legend title
+var legendTitle = ui.Label({
+  value: 'Legend',
+  style: {
+    fontWeight: 'bold',
+    fontSize: '18px',
+    margin: '0 0 4px 0',
+    padding: '0'
+  }
+});
+legend.add(legendTitle);
+
+// Function to create a legend row
+var makeLegendRow = function(color, name) {
+  var colorBox = ui.Label({
+    style: {
+      backgroundColor: color,
+      padding: '8px',
+      margin: '0 0 4px 0'
+    }
+  });
+
+  var description = ui.Label({
+    value: name,
+    style: {margin: '0 0 4px 6px'}
+  });
+
+  return ui.Panel({
+    widgets: [colorBox, description],
+    layout: ui.Panel.Layout.Flow('horizontal')
+  });
+};
+
+// Add legend entries
+legend.add(makeLegendRow('#3caadc', 'Flood inundation area '));
+
+legend.add(makeLegendRow('BLUE', 'Perennial water body'));
+
+// Add the legend to the map
+Map.add(legend);
