@@ -1,0 +1,200 @@
+// Coordinates provided to view map
+Map.centerObject(bnd, 10);  
+
+// Selecting the pre-monsoon or pre-flood Copernicus Sentinel-1 
+var SenImgPre = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterDate('2024-01-01', '2024-03-31')
+  .filterBounds(bnd);
+
+// Filtering pre-flood Copernicus Sentinel-1 image by metadata properties.
+var vhPre = SenImgPre
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+  .filter(ee.Filter.eq('instrumentMode', 'IW'));
+
+// Filtering to get Sentinel-1 images from different look angles for pre-flood.
+var vhAscendPre = vhPre.filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'));
+var vhDescendPre = vhPre.filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING'));
+
+// Creating a composite from means at different polarizations and look angles.
+var preComposite = ee.Image.cat([
+  vhAscendPre.select('VH').mean().rename('VHPre'),
+  ee.ImageCollection(vhAscendPre.select('VV').merge(vhDescendPre.select('VV'))).mean().rename('VVPre'),
+  vhDescendPre.select('VH').mean().rename('VHPre')
+]).focal_median();
+
+// Applying Speckle Filters to pre-flood VH and VV bands
+var vvPreSmoothed = preComposite.select('VVPre').focal_median(100, 'circle', 'meters').rename('VVPre_Filtered');
+var vhPreSmoothed = preComposite.select('VHPre').focal_median(100, 'circle', 'meters').rename('VHPre_Filtered');
+
+
+// Selecting the flood Copernicus Sentinel-1 
+var SenImgFlood = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterDate('2022-08-14', '2022-08-22')
+  .filterBounds(bnd);
+print('Flood Image Collection:', SenImgFlood);
+// Filtering flood time Copernicus Sentinel-1 image by metadata properties.
+var vhFlood = SenImgFlood
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+  .filter(ee.Filter.eq('instrumentMode', 'IW'));
+
+// Filtering flood time Copernicus Sentinel-1 image from different look angles.
+var vhAscendFlood = vhFlood.filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'));
+var vhDescendFlood = vhFlood.filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING'));
+
+// Create a composite from means at different polarizations and look angles.
+var floodComposite = ee.Image.cat([
+  vhAscendFlood.select('VH').mean(),
+  ee.ImageCollection(vhAscendFlood.select('VV').merge(vhDescendFlood.select('VV'))).mean(),
+  vhDescendFlood.select('VH').mean()
+]).focal_median();
+
+// Speckle Filter of the Sentinel-1 image for flood data
+var vvFloodSmoothed = floodComposite.select('VV').focal_median(100, 'circle', 'meters').rename('VVFlood_Filtered');
+var vhFloodSmoothed = floodComposite.select('VH').focal_median(100, 'circle', 'meters').rename('VHFlood_Filtered');
+var vvvhFloodRatio = vhFloodSmoothed.divide(vvPreSmoothed);
+var vvvhFloodSmoothed = vvvhFloodRatio.focal_median(100, 'circle', 'meters').rename('VVVH_Flood_Filtered');
+var vvDifference = vvPreSmoothed.subtract(vvFloodSmoothed).rename('VVDifference_Filtered');
+
+var vegSoilMoistureComposite = ee.Image.cat([ vvFloodSmoothed, vhPreSmoothed, vvDifference ]);
+
+
+
+
+
+
+// Sentinel-1 RGB composite (VV, VH, VV/VH backscatter)
+var rgb_composite = ee.Image.cat([vvPreSmoothed, vhFloodSmoothed, vvvhFloodSmoothed]);
+
+
+Map.addLayer(rgb_composite.clip(bnd), {
+  bands: ['VVPre_Filtered', 'VHFlood_Filtered', 'VVVH_Flood_Filtered'], 
+  min: [-25, -25, 0], 
+  max: [0, 0, 10], 
+  gamma: 1.5
+}, 'Sentinel Composite');
+
+
+// Create a Flood Image Composite using various bands
+var FloodImgComposite = ee.Image.cat([
+  vvFloodSmoothed.rename('VVFlood_Filtered'), 
+  vhPreSmoothed.rename('VHPre_Filtered'), 
+  vvDifference.rename('VVDifference_Filtered'), 
+  vvvhFloodRatio.rename('VVVH_Flood_Ratio'), 
+  vhFloodSmoothed.rename('VHFlood_Filtered'), 
+  vvvhFloodSmoothed.rename('VVVH_Flood_Filtered')
+]);
+
+// Create Flood Image Composite to the map
+
+Map.addLayer(FloodImgComposite.clip(bnd), {
+  bands: ['VVFlood_Filtered', 'VHPre_Filtered', 'VVDifference_Filtered'], 
+  min: [-25, -25, -10],
+  max: [0, 0, 10],
+  gamma: 1.5
+}, 'FLood Image Composite');
+
+
+
+// Masking normal water bodies using VV PreFlood
+var waterMask_PreFlood = vvPreSmoothed.updateMask(vvPreSmoothed.lt(-17)).toUint16();
+
+var floodVisualization = {min: 1, max: 3, palette: ['#3caadc', '007f00', '007f00']};
+
+// Flood masking and mosaicking the Sentinel-1 image
+var classifiedFloodPB = ee.ImageCollection([
+  vvFloodSmoothed.updateMask(vvFloodSmoothed.lt(-15.94)).visualize(floodVisualization),
+  vhPreSmoothed.updateMask(vhPreSmoothed.lt(-24.06)).visualize(floodVisualization),
+  vvvhFloodRatio.updateMask(vvvhFloodRatio.lt(-28)).visualize(floodVisualization),
+  
+  waterMask_PreFlood.visualize({palette: ['BLUE']})
+]).mosaic();
+
+// Visualization parameters for Sentinel backscatter
+
+Map.addLayer(classifiedFloodPB.clip(bnd), {}, 'Flood Map Pixel Based');
+
+
+// ** Export the Pixel-Based Flood Map (Flood Map Pixel-Based PB)) **
+Export.image.toDrive({
+  image: classifiedFloodPB,  // Clipped Pixel-Based Flood Map
+  description: 'Flood_Map_Aug_2022',
+  folder: 'a',  // a is the folder name, please specify the Google Drive folder name
+  fileNamePrefix: 'Flood_Map_PB',  // File name for the exported image
+  scale: 10,  // Sentinel-1 resolution scale, recomanded to export 30 meter scale
+  region: bnd,  // Study ara boundary
+  fileFormat: 'GeoTIFF',
+  maxPixels: 3e9  // Adjust this if necessary for larger regions
+});
+
+
+/*
+Kabir Uddin, ICIMOD, Nepal Email: Kabir.Uddin@icimod.org kabir.uddin.bd@gmail.com 
+*/
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// Create a legend panel
+var legend = ui.Panel({
+  style: {
+    position: 'bottom-right',
+    padding: '8px 15px'
+  }
+});
+
+// Create legend title
+var legendTitle = ui.Label({
+  value: 'Legend',
+  style: {
+    fontWeight: 'bold',
+    fontSize: '18px',
+    margin: '0 0 4px 0',
+    padding: '0'
+  }
+});
+legend.add(legendTitle);
+
+// Function to create a legend row
+var makeLegendRow = function(color, name) {
+  var colorBox = ui.Label({
+    style: {
+      backgroundColor: color,
+      padding: '8px',
+      margin: '0 0 4px 0'
+    }
+  });
+
+  var description = ui.Label({
+    value: name,
+    style: {margin: '0 0 4px 6px'}
+  });
+
+  return ui.Panel({
+    widgets: [colorBox, description],
+    layout: ui.Panel.Layout.Flow('horizontal')
+  });
+};
+
+// Add legend entries
+legend.add(makeLegendRow('#3caadc', 'Flood inundation area '));
+
+legend.add(makeLegendRow('BLUE', 'Perennial water body'));
+
+// Add the legend to the map
+Map.add(legend);
