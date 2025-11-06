@@ -1,0 +1,115 @@
+// Coordinates provided to view map
+Map.centerObject(bnd, 7);
+
+// Selecting the pre-monsoon or pre-flood Copernicus Sentinel-1 
+var SenImgPre = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterDate('2024-01-01', '2024-04-30')
+  .filterBounds(bnd);
+
+// Filtering pre-flood Copernicus Sentinel-1 image by metadata properties.
+var vhPre = SenImgPre
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+  .filter(ee.Filter.eq('instrumentMode', 'IW'));
+
+// Filtering to get Sentinel-1 images from different look angles for pre-flood.
+var vhAscendPre = vhPre.filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'));
+var vhDescendPre = vhPre.filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING'));
+
+// Creating a composite from means at different polarizations and look angles.
+var preComposite = ee.Image.cat([
+  vhAscendPre.select('VH').mean().rename('VHPre'),
+  ee.ImageCollection(vhAscendPre.select('VV').merge(vhDescendPre.select('VV'))).mean().rename('VVPre'),
+  vhDescendPre.select('VH').mean().rename('VHPre')
+]).focal_median();
+
+// Applying Speckle Filters to pre-flood VH and VV bands
+var vvPreSmoothed = preComposite.select('VVPre').focal_median(100, 'circle', 'meters').rename('VVPre_Filtered');
+var vhPreSmoothed = preComposite.select('VHPre').focal_median(100, 'circle', 'meters').rename('VHPre_Filtered');
+
+
+// Selecting the flood Copernicus Sentinel-1 
+var SenImgFlood = ee.ImageCollection('COPERNICUS/S1_GRD')
+  .filterDate('2024-09-02', '2024-10-07')
+  .filterBounds(bnd);
+print('Flood Image Collection:', SenImgFlood);
+// Filtering flood time Copernicus Sentinel-1 image by metadata properties.
+var vhFlood = SenImgFlood
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VV'))
+  .filter(ee.Filter.listContains('transmitterReceiverPolarisation', 'VH'))
+  .filter(ee.Filter.eq('instrumentMode', 'IW'));
+
+// Filtering flood time Copernicus Sentinel-1 image from different look angles.
+var vhAscendFlood = vhFlood.filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'));
+var vhDescendFlood = vhFlood.filter(ee.Filter.eq('orbitProperties_pass', 'DESCENDING'));
+
+// Create a composite from means at different polarizations and look angles.
+var floodComposite = ee.Image.cat([
+  vhAscendFlood.select('VH').mean(),
+  ee.ImageCollection(vhAscendFlood.select('VV').merge(vhDescendFlood.select('VV'))).mean(),
+  vhDescendFlood.select('VH').mean()
+]).focal_median();
+
+// Speckle Filter of the Sentinel-1 image for flood data
+var vvFloodSmoothed = floodComposite.select('VV').focal_median(100, 'circle', 'meters').rename('VVFlood_Filtered');
+var vhFloodSmoothed = floodComposite.select('VH').focal_median(100, 'circle', 'meters').rename('VHFlood_Filtered');
+var vvvhFloodRatio = vhFloodSmoothed.divide(vvPreSmoothed);
+var vvvhFloodSmoothed = vvvhFloodRatio.focal_median(100, 'circle', 'meters').rename('VVVH_Flood_Filtered');
+var vvDifference = vvPreSmoothed.subtract(vvFloodSmoothed).rename('VVDifference_Filtered');
+
+var vegSoilMoistureComposite = ee.Image.cat([ vvFloodSmoothed, vhPreSmoothed, vvDifference ]);
+
+
+
+
+
+
+// Sentinel-1 RGB composite (VV, VH, VV/VH backscatter)
+var rgb_composite = ee.Image.cat([vvPreSmoothed, vhFloodSmoothed, vvvhFloodSmoothed]);
+
+
+Map.addLayer(rgb_composite.clip(bnd), {
+  bands: ['VVPre_Filtered', 'VHFlood_Filtered', 'VVVH_Flood_Filtered'], 
+  min: [-25, -25, 0], 
+  max: [0, 0, 10], 
+  gamma: 1.5
+}, 'Sentinel Composite');
+
+
+// Create a Flood Image Composite using various bands
+var FloodImgComposite = ee.Image.cat([
+  vvFloodSmoothed.rename('VVFlood_Filtered'), 
+  vhPreSmoothed.rename('VHPre_Filtered'), 
+  vvDifference.rename('VVDifference_Filtered'), 
+  vvvhFloodRatio.rename('VVVH_Flood_Ratio'), 
+  vhFloodSmoothed.rename('VHFlood_Filtered'), 
+  vvvhFloodSmoothed.rename('VVVH_Flood_Filtered')
+]);
+
+// Create Flood Image Composite to the map
+
+// Map.addLayer(FloodImgComposite.clip(bnd), {
+//   bands: ['VVFlood_Filtered', 'VHPre_Filtered', 'VVDifference_Filtered'], 
+//   min: [-25, -25, -10],
+//   max: [0, 0, 10],
+//   gamma: 1.5
+// }, 'FLood Image Composite');
+
+
+
+// Export the RGB composite image to Google Drive
+Export.image.toDrive({
+  image: rgb_composite,
+  description: 'Sentinel1_RGB_Composite',
+  folder: 'a', // Specify your Google Drive folder name
+  fileNamePrefix: 'Sentinel1_RGB_Composite_2024', // File name of the exported image
+  scale: 10, // Choose an appropriate scale based on Sentinel-1 resolution
+  region: bnd, // Define the region, assuming bnd is an ee.Geometry object
+  fileFormat: 'GeoTIFF',
+  maxPixels: 3e9 // Adjust this value if the default is too low for your region size
+});
+
+
+/*
+Kabir Uddin, ICIMOD, Nepal Email: Kabir.Uddin@icimod.org kabir.uddin.bd@gmail.com 
+*/
